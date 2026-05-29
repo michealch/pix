@@ -6,6 +6,7 @@
 #include "screens/eth.h"
 #include "screens/ip.h"
 #include "screens/lastfm.h"
+#include "screens/marquee.h"
 #include "screens/poo.h"
 #include "screens/weather.h"
 #include "screens/year.h"
@@ -20,13 +21,12 @@ Pix::Pix(Platform *p) {
       {"lastfm", new LastFM(p)},   {"eth", new ETH(p)},
       {"btc", new BTC(p)},         {"year", new Year(p)},
       {"weather", new Weather(p)}, {"binclock", new BinClock(p)},
-      {"crab", new Crab(p)},       {"ip", new Ip(p)},
+      {"crab", new Crab(p)},       {"marquee", new Marquee(p)},
+      {"ip", new Ip(p)},
   };
 
   screens_order = {
-      "clock", "poo",      "clock", "lastfm", "clock", "eth",
-      "clock", "btc",      "clock", "year",   "clock", "weather",
-      "clock", "binclock", "clock", "crab",   "clock", "ip",
+      "clock", "poo", "clock", "marquee",
   };
 
   current_screen = 0;

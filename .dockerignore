@@ -1,0 +1,17 @@
+*
+!Dockerfile
+!Makefile
+!.dockerignore
+!pix_esp8266/
+!pix_esp8266/platformio.ini
+
+.git
+pix_elixir/
+pix_ruby/
+pix_kernel/
+images/
+**/.pio
+**/build
+**/log.txt
+**/.cache
+**/compile_commands.json

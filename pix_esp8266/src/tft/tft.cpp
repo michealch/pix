@@ -3,9 +3,9 @@
 TFT::TFT() {
   Serial.begin(115200);
 
+  setup_tft();
   setup_wifi();
   setup_time();
-  setup_tft();
   setup_ota();
 }
 
@@ -58,9 +58,9 @@ void TFT::draw() {
       }
     }
   }
-  auto delay_ms = 20 - (millis() - start_time);
-  if (delay_ms > 0) {
-    delay(delay_ms);
+  uint32_t elapsed = millis() - start_time;
+  if (elapsed < 20) {
+    delay(20 - elapsed);
   };
 }
 
@@ -109,9 +109,14 @@ void TFT::setup_wifi() {
   debug("Connecting to wifi..");
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
+  for (uint8_t i = 0; i < 10 && WiFi.waitForConnectResult() != WL_CONNECTED;
+       i++) {
     delay(2000);
     debug("Retrying wifi connection..");
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    debug("Wifi connection failed.");
+    return;
   }
   debug("IP address:");
   debug(WiFi.localIP().toString().c_str());
@@ -136,6 +141,12 @@ void TFT::setup_tft() {
   tft = new TFT_eSPI();
   tft->init();
   tft->fillScreen(TFT_BLACK);
+  clear();
+  for (uint8_t y = 0; y < 16; y++) {
+    for (uint8_t x = 0; x < 16; x++) {
+      pixel_data_old[y][x] = 0;
+    }
+  }
 }
 
 void TFT::setup_ota() {
