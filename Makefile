@@ -1,16 +1,17 @@
 IMAGE ?= pix-builder
-DOCKER_CONTEXT ?= dietpi
+DOCKER_CONTEXT ?= default
 DOCKER ?= docker --context $(DOCKER_CONTEXT)
-REMOTE_HOST ?= dietpi
-REMOTE_ROOT ?= /home/dietpi/projects/pix
-PROJ ?= $(REMOTE_ROOT)/pix_esp8266
-HOST_UID ?= 1000
-HOST_GID ?= 1000
+REMOTE_HOST ?=
+REMOTE_ROOT ?= ~/projects/pix
+LOCAL_PROJ ?= $(CURDIR)/pix_esp8266
+PROJ ?= $(if $(REMOTE_HOST),$(REMOTE_ROOT)/pix_esp8266,$(LOCAL_PROJ))
+HOST_UID ?= $(shell id -u)
+HOST_GID ?= $(shell id -g)
 PIO_VERSION ?= 6.1.18
 DEVICE ?= /dev/ttyUSB0
-DEVICE_FLAGS ?= --privileged --device=$(DEVICE)
-UPLOAD_DEVICE ?= /dev/ttyACM0
-UPLOAD_DEVICE_FLAGS ?= --privileged -u root:root --device=$(UPLOAD_DEVICE)
+DEVICE_FLAGS ?=
+UPLOAD_DEVICE ?= $(DEVICE)
+UPLOAD_DEVICE_FLAGS ?= --privileged --device=$(UPLOAD_DEVICE)
 SYNC_ITEMS ?= Dockerfile .dockerignore Makefile pix_esp8266
 
 .PHONY: image sync fix-perms build upload shell clean
@@ -23,22 +24,28 @@ image:
 		.
 
 sync:
-	ssh $(REMOTE_HOST) 'mkdir -p $(REMOTE_ROOT)'
-	COPYFILE_DISABLE=1 tar --no-xattrs \
-		--exclude='.git' \
-		--exclude='__MACOSX' \
-		--exclude='._*' \
-		--exclude='*/._*' \
-		--exclude='pix_esp8266/.pio' \
-		--exclude='pix_esp8266/.vscode' \
-		--exclude='**/.cache' \
-		--exclude='**/compile_commands.json' \
-		-cf - $(SYNC_ITEMS) | ssh $(REMOTE_HOST) 'tar -xf - -C $(REMOTE_ROOT)'
-	ssh $(REMOTE_HOST) 'find $(REMOTE_ROOT) -name "._*" -delete'
+	@if [ -n "$(REMOTE_HOST)" ]; then \
+		ssh $(REMOTE_HOST) 'mkdir -p $(REMOTE_ROOT)'; \
+		COPYFILE_DISABLE=1 tar --no-xattrs \
+			--exclude='.git' \
+			--exclude='__MACOSX' \
+			--exclude='._*' \
+			--exclude='*/._*' \
+			--exclude='pix_esp8266/.pio' \
+			--exclude='pix_esp8266/.vscode' \
+			--exclude='**/.cache' \
+			--exclude='**/compile_commands.json' \
+			-cf - $(SYNC_ITEMS) | ssh $(REMOTE_HOST) 'tar -xf - -C $(REMOTE_ROOT)'; \
+		ssh $(REMOTE_HOST) 'find $(REMOTE_ROOT) -name "._*" -delete'; \
+	else \
+		printf 'REMOTE_HOST is empty; using local project at %s\n' '$(LOCAL_PROJ)'; \
+	fi
 
 fix-perms:
-	$(DOCKER) run --rm --user root -v $(PROJ):/workspace \
-		$(IMAGE) chown -R $(HOST_UID):$(HOST_GID) /workspace/.pio
+	@if [ -d "$(if $(REMOTE_HOST),,$(LOCAL_PROJ)/.pio)" ] || [ -n "$(REMOTE_HOST)" ]; then \
+		$(DOCKER) run --rm --user root -v $(PROJ):/workspace \
+			$(IMAGE) sh -c 'if [ -d /workspace/.pio ]; then chown -R $(HOST_UID):$(HOST_GID) /workspace/.pio; fi'; \
+	fi
 
 build: sync fix-perms
 	$(DOCKER) run --rm -v $(PROJ):/workspace \

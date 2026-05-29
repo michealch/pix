@@ -1,55 +1,85 @@
 # AGENTS.md
 
 This file is for AI coding agents working in this repository. Read it before
-editing. The active user workflow is macOS source editing plus Linux-hosted
-Docker builds for an ESP8266 device connected to the Linux host.
+editing. Keep the project usable by public contributors: avoid machine-specific
+paths, hostnames, private Wi-Fi names, or personal workflow assumptions in docs
+and scripts.
 
 ## Repository Shape
 
-- Root project: `/Users/michealchoudhary/projects/pix` on macOS.
 - Active firmware: `pix_esp8266/`.
 - Active PlatformIO environment: `tft`.
 - Target board: ESP8266 ESP-12 class board, PlatformIO board `esp12e`.
 - Display: ST7789 240x240 TFT through TFT_eSPI.
-- Remote Linux build/flash host: Docker context and SSH host `dietpi`.
-- Remote synced path: `/home/dietpi/projects/pix`.
+- Historical or alternate implementations: `pix_ruby/`, `pix_elixir/`,
+  `pix_kernel/`.
 
-Other directories (`pix_ruby/`, `pix_elixir/`, `pix_kernel/`) are historical or
-alternate implementations. Do not change them for ESP8266 TFT work unless the
-user explicitly asks.
+Unless the user explicitly asks otherwise, ESP8266 TFT work should be limited to
+the root build files and `pix_esp8266/`.
 
-## Source Of Truth And Sync
+## Public Usability Rules
 
-The macOS checkout is the source of truth. Docker bind mounts with
-`docker --context dietpi` resolve paths on the Linux host, not on macOS.
+- Do not add private hostnames, usernames, absolute personal paths, Wi-Fi names,
+  or local network details to committed files.
+- Prefer configurable Makefile variables over hardcoded environment details.
+- Document examples with placeholder values such as `my-linux-box`,
+  `/home/user/projects/pix`, and `your-wifi`.
+- Keep local/remote build instructions generic.
+- Do not commit firmware binaries, `.pio`, secrets, API keys, or generated
+  caches.
 
-Therefore, never assume that editing a file locally automatically changes what
-the Docker build sees. Use the root Makefile targets:
+## Build Model
+
+The default workflow is local Docker:
 
 ```sh
+make image
 make build WIFI_SSID="..." WIFI_PASS="..."
 make upload WIFI_SSID="..." WIFI_PASS="..."
 ```
 
-Those targets run `make sync` first, copying the macOS project to
-`dietpi:/home/dietpi/projects/pix`.
+The root `Makefile` defaults to:
 
-The sync command intentionally excludes:
+```make
+DOCKER_CONTEXT ?= default
+REMOTE_HOST ?=
+LOCAL_PROJ ?= $(CURDIR)/pix_esp8266
+DEVICE ?= /dev/ttyUSB0
+UPLOAD_DEVICE ?= $(DEVICE)
+```
+
+When `REMOTE_HOST` is empty, `make sync` is a no-op and Docker bind-mounts the
+local `pix_esp8266/` directory.
+
+Optional remote mode is enabled by setting:
+
+```sh
+DOCKER_CONTEXT=<docker-context>
+REMOTE_HOST=<ssh-host>
+REMOTE_ROOT=<remote-project-root>
+```
+
+In remote mode, Docker bind mounts are resolved on the remote Docker host, so
+`make sync` copies the local checkout to `REMOTE_ROOT` before build/upload.
+
+## Sync Behavior
+
+`make sync` intentionally excludes:
 
 - `.git`
 - `pix_esp8266/.pio`
 - `pix_esp8266/.vscode`
 - `__MACOSX`
-- `._*` AppleDouble sidecar files
+- `._*` host metadata sidecar files
 - cache and compile database files
 
-Do not replace this with a naive tar/scp/rsync command unless you preserve those
-exclusions. macOS AppleDouble files such as `._pix.cpp` can be compiled by
-PlatformIO as source and break the build.
+Do not replace this with a naive copy command unless the same exclusions are
+preserved. Sidecar files such as `._pix.cpp` can be compiled by PlatformIO
+as source and break the build.
 
 ## Build And Upload Commands
 
-Build the Docker image on the Linux Docker host:
+Build the Docker image:
 
 ```sh
 make image
@@ -61,73 +91,83 @@ Build firmware:
 make build WIFI_SSID="..." WIFI_PASS="..."
 ```
 
-Upload firmware to the connected ESP:
+Upload firmware:
 
 ```sh
 make upload WIFI_SSID="..." WIFI_PASS="..."
 ```
 
-Current upload behavior is intentionally root and privileged inside the
-container, with `UPLOAD_DEVICE ?= /dev/ttyACM0` passed through:
+Override the serial device:
 
 ```sh
-docker --context dietpi run --rm \
-  -v /home/dietpi/projects/pix/pix_esp8266:/workspace \
-  -e WIFI_SSID="..." \
-  -e WIFI_PASS="..." \
-  --privileged \
-  -u root:root \
-  --device=/dev/ttyACM0 \
-  pix-builder platformio run -e tft -t upload
+make upload UPLOAD_DEVICE=/dev/ttyACM0 WIFI_SSID="..." WIFI_PASS="..."
 ```
 
-If upload fails because the device path changed, inspect the Linux host:
+Inspect serial devices on the machine that runs Docker:
 
 ```sh
-ssh dietpi 'ls -l /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/* 2>/dev/null'
+ls -l /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/* 2>/dev/null
 ```
 
-Then override `UPLOAD_DEVICE` or update the Makefile:
-
-```sh
-make upload UPLOAD_DEVICE=/dev/ttyUSB0 WIFI_SSID="..." WIFI_PASS="..."
-```
+If Docker needs different serial permissions, override `UPLOAD_DEVICE_FLAGS`.
 
 ## Dockerfile Design
 
 The root `Dockerfile` is multi-stage:
 
-- `base`: Python slim Bookworm, system dependencies, PlatformIO.
+- `base`: Python slim Bookworm, system dependencies, PlatformIO, and a non-root
+  builder user.
 - `deps`: copies only `pix_esp8266/platformio.ini` and runs
   `platformio pkg install -e tft`.
 - `runtime`: copies the warmed `.platformio` directory and defaults to
   `platformio run -e tft`.
 
-The image intentionally does not copy `pix_esp8266/src`. Source is supplied by
-the runtime bind mount after `make sync`.
+The image intentionally does not copy `pix_esp8266/src`. Source is provided by a
+runtime bind mount.
 
 Keep `platformio.ini` version ranges unless the user explicitly asks to pin or
 change them.
 
-## Generated Artifacts And Permissions
-
-The remote generated PlatformIO tree is:
+The firmware artifact image is built with:
 
 ```sh
-/home/dietpi/projects/pix/pix_esp8266/.pio
+Dockerfile.firmware
 ```
 
-Uploads or manual Docker commands may leave generated files owned by root. The
-Makefile has `fix-perms`:
+It is `FROM scratch` and copies only:
+
+```sh
+pix_esp8266/.pio/build/tft/firmware.bin
+```
+
+to:
+
+```sh
+/firmware.bin
+```
+
+The root `.dockerignore` must allow `Dockerfile.firmware` and that exact
+firmware path, otherwise the CI image build will fail.
+
+## Generated Artifacts And Permissions
+
+PlatformIO generated output is under:
+
+```sh
+pix_esp8266/.pio
+```
+
+Privileged uploads or manual Docker commands can leave generated files owned by
+root. Use:
 
 ```sh
 make fix-perms
 ```
 
-It runs a root container and chowns `/workspace/.pio` to `1000:1000`. The normal
-`build` and `upload` targets already depend on `fix-perms`.
+The normal `build` and `upload` targets already depend on `fix-perms`.
 
-Do not commit `.pio`, firmware binaries, build directories, or cache files.
+Do not commit `.pio`, firmware binaries, build directories, cache files, or
+generated compile databases.
 
 ## PlatformIO Configuration
 
@@ -143,12 +183,13 @@ Key details:
 - `board = esp12e`.
 - `framework = arduino`.
 - `build_src_filter` includes `src/pix` and `src/tft`.
-- Wi-Fi credentials are injected from environment variables:
-  `WIFI_SSID` and `WIFI_PASS`.
-- Optional API values are also environment-backed:
-  `OWM_KEY`, `LASTFM_USER`, and `LASTFM_KEY`.
+- Wi-Fi credentials are injected from `WIFI_SSID` and `WIFI_PASS`.
+- Optional API values are `OWM_KEY`, `LASTFM_USER`, and `LASTFM_KEY`.
 - TFT_eSPI is configured entirely through `build_flags`; there is no
   `User_Setup.h`.
+
+Important: credentials passed through PlatformIO build flags are compiled into
+`firmware.bin`. Do not publish firmware containing private credentials.
 
 ## Firmware Architecture
 
@@ -162,7 +203,7 @@ Important files:
 - `pix_esp8266/src/pix/pix.cpp`: screen registry, carousel order, scheduling.
 - `pix_esp8266/src/tft/tft.cpp`: TFT implementation, dot-grid scaling, Wi-Fi,
   time, OTA.
-- `pix_esp8266/src/pix/chars.cpp`: 3x7 logical grid font.
+- `pix_esp8266/src/pix/chars.cpp`: logical grid font.
 - `pix_esp8266/src/pix/screens/`: individual screens.
 
 Palette values in `screen.h`:
@@ -190,24 +231,23 @@ Follow the existing idiom:
 
 - Use `throttle` to slow animations.
 - Do not put `delay()` in screens.
-- Do not use `millis()` inside screens unless you are intentionally changing the
+- Do not use `millis()` inside screens unless intentionally changing the
   scheduling model.
 - Use `platform->clear()` and `platform->set_dot()`.
 
 ## TFT Startup And Freeze Notes
 
 `TFT::setup_tft()` should run before Wi-Fi setup so the display initializes even
-if networking is bad. `TFT::draw()` must avoid unsigned underflow when pacing
-frames; if elapsed time is greater than the target frame time, do not delay.
+if networking is unavailable. `TFT::draw()` must avoid unsigned underflow when
+pacing frames; if elapsed time is greater than the target frame time, do not
+delay.
 
-If the screen is black after flashing, inspect these first:
+If the screen is black after flashing, inspect:
 
-- Was the firmware built from the synced macOS source?
-- Did `make build` or `make upload` succeed after sync?
-- Is the flashed binary the one under the remote `.pio/build/tft/` path?
-- Does the display initialize before Wi-Fi?
-- Is `TFT_BACKLIGHT` still correct for the board?
-- Is the device actually booting, or stuck in Wi-Fi/time setup?
+- Was the newly built `firmware.bin` flashed?
+- Do display wiring and TFT build flags match the board?
+- Is `TFT_BACKLIGHT` correct for the hardware?
+- Is the device booting, or stuck in Wi-Fi/time setup?
 
 ## Adding Or Editing Screens
 
@@ -251,6 +291,89 @@ It scrolls right-to-left in dot-grid units:
 Speed is controlled with `throttle` and `SCROLL_STEP`. Smaller throttle is
 faster; larger throttle is slower.
 
+## GitHub Actions Release Pipeline
+
+The CI workflow is:
+
+```sh
+.github/workflows/firmware-release.yml
+```
+
+It runs on every pushed commit. The `secret-scan` job always runs. The `release`
+job runs only on the repository default branch and skips commits whose message
+starts with `chore(release):` or contains `[skip release]`.
+
+Pipeline responsibilities:
+
+- Run Gitleaks before releasing.
+- Use `git-cliff` to calculate the next semantic version from Conventional
+  Commit messages.
+- Generate `RELEASE_NOTES.md`.
+- Prepend release notes to `CHANGELOG.md`.
+- Commit the changelog with `chore(release): prepare vX.Y.Z [skip release]`.
+- Build the PlatformIO builder image from `Dockerfile`.
+- Build `pix_esp8266/.pio/build/tft/firmware.bin`.
+- Build `Dockerfile.firmware`, a scratch image containing only `/firmware.bin`.
+- Push the image to `ghcr.io/<owner>/<repo>/firmware:<tag>` and `latest`.
+- Push the git tag.
+- Create a GitHub Release and attach `firmware.bin`.
+
+Do not remove the `[skip release]` marker from the release commit. It prevents a
+recursive release when the workflow pushes `CHANGELOG.md`.
+
+The workflow needs:
+
+- `contents: write` for changelog commits, tags, and GitHub Releases.
+- `packages: write` for GitHub Container Registry.
+
+If the default branch is protected, the workflow may fail while pushing
+`CHANGELOG.md`; either allow GitHub Actions to push release commits or change
+the release strategy before merging.
+
+## git-cliff
+
+The config is:
+
+```sh
+cliff.toml
+```
+
+Use Conventional Commit messages:
+
+```text
+feat: add a screen
+fix: prevent display freeze
+docs: update build instructions
+ci: improve release pipeline
+```
+
+Breaking changes should use `!` or a `BREAKING CHANGE:` footer. Agents should
+not manually edit generated sections in `CHANGELOG.md` unless the user asks.
+
+## Secret Scanning
+
+The workflow uses Gitleaks to detect accidentally committed secrets. Treat a
+Gitleaks failure as a real security event:
+
+- Do not silence it with broad allowlist rules.
+- Remove the secret from history if it was actually committed.
+- Rotate the exposed credential.
+- Only add narrow allowlist entries for known false positives.
+
+The firmware build can read these CI values:
+
+```text
+FIRMWARE_WIFI_SSID   repository variable
+FIRMWARE_WIFI_PASS   repository secret
+OWM_KEY              repository secret
+LASTFM_USER          repository variable
+LASTFM_KEY           repository secret
+```
+
+If CI uses real credentials, they are embedded in the release asset and firmware
+container image. For public releases, prefer placeholder CI credentials and let
+users build personal firmware locally.
+
 ## Code Style
 
 - Keep C++ compatible with the current PlatformIO/Arduino toolchain and existing
@@ -258,20 +381,26 @@ faster; larger throttle is slower.
 - Prefer the local style over broad refactors.
 - Keep edits scoped to the user's request.
 - Use ASCII unless there is a strong reason not to.
-- Do not commit secrets, Wi-Fi credentials, API keys, firmware binaries, or
-  generated PlatformIO directories.
+- Do not commit secrets, credentials, API keys, firmware binaries, or generated
+  PlatformIO directories.
 
 ## Verification Checklist For Agents
 
 After firmware changes:
 
-1. Run `make build WIFI_SSID="..." WIFI_PASS="..."` from the macOS checkout.
-2. Confirm the build succeeds for `env:tft`.
-3. Review warnings and call out any new ones.
-4. If flashing is requested, run `make upload WIFI_SSID="..." WIFI_PASS="..."`
-   only when the Linux serial device path is known and present.
-5. If upload fails, check `/dev/ttyUSB*`, `/dev/ttyACM*`, and
-   `/dev/serial/by-id/*` on `dietpi`.
+1. Run `make -n build WIFI_SSID=... WIFI_PASS=...`.
+2. Run `make build WIFI_SSID="..." WIFI_PASS="..."` when Docker is available.
+3. Confirm the build succeeds for `env:tft`.
+4. Review warnings and call out any new ones.
+5. If flashing is requested, run `make upload WIFI_SSID="..." WIFI_PASS="..."`
+   only when the serial device path is known and present.
 
-When reporting results, mention that build/upload happened through the Linux
-Docker context, not a local macOS PlatformIO install.
+After CI/release changes:
+
+1. Parse or inspect `.github/workflows/firmware-release.yml`.
+2. Run `make -n build WIFI_SSID=... WIFI_PASS=...`.
+3. Run `make -n upload WIFI_SSID=... WIFI_PASS=...`.
+4. Confirm `.dockerignore` exposes only files needed by `Dockerfile` and
+   `Dockerfile.firmware`.
+5. Confirm README and AGENTS mention any new secrets, variables, tags, or
+   release artifacts.

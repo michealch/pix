@@ -1,0 +1,13 @@
+FROM scratch
+
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED=unknown
+
+LABEL org.opencontainers.image.title="PIX ESP8266 firmware"
+LABEL org.opencontainers.image.description="Container artifact containing only firmware.bin for the PIX ESP8266 TFT firmware"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${REVISION}"
+LABEL org.opencontainers.image.created="${CREATED}"
+
+COPY pix_esp8266/.pio/build/tft/firmware.bin /firmware.bin

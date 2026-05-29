@@ -1,0 +1,210 @@
+name: Firmware Release
+
+on:
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository for leaked secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: false
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true
+          GITLEAKS_ENABLE_SUMMARY: true
+
+  release:
+    name: Build, tag, package, and release
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      !startsWith(github.event.head_commit.message, 'chore(release):') &&
+      !contains(github.event.head_commit.message, '[skip release]')
+    permissions:
+      contents: write
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}/firmware
+      WIFI_SSID: ${{ vars.FIRMWARE_WIFI_SSID || 'ci' }}
+      WIFI_PASS: ${{ secrets.FIRMWARE_WIFI_PASS || 'ci-password' }}
+      OWM_KEY: ${{ secrets.OWM_KEY || '' }}
+      LASTFM_USER: ${{ vars.LASTFM_USER || '' }}
+      LASTFM_KEY: ${{ secrets.LASTFM_KEY || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@git-cliff
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine next version
+        id: version
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          version="$(git cliff --bumped-version)"
+          tag="v${version#v}"
+
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            tagged_sha="$(git rev-list -n 1 "${tag}")"
+            head_sha="$(git rev-parse HEAD)"
+
+            if [ "${tagged_sha}" = "${head_sha}" ]; then
+              echo "Tag ${tag} already points at HEAD; nothing to release."
+              echo "skip=true" >> "${GITHUB_OUTPUT}"
+              echo "version=${version}" >> "${GITHUB_OUTPUT}"
+              echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+
+            base="${tag#v}"
+            major="${base%%.*}"
+            rest="${base#*.}"
+            minor="${rest%%.*}"
+            patch="${rest#*.}"
+
+            while git rev-parse -q --verify "refs/tags/v${major}.${minor}.${patch}" >/dev/null; do
+              patch="$((patch + 1))"
+            done
+
+            version="${major}.${minor}.${patch}"
+            tag="v${version}"
+          fi
+
+          echo "skip=false" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate changelog
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git cliff --unreleased --tag "${RELEASE_TAG}" --strip header > RELEASE_NOTES.md
+          git cliff --unreleased --tag "${RELEASE_TAG}" --prepend CHANGELOG.md
+
+      - name: Commit changelog
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- CHANGELOG.md; then
+            git add CHANGELOG.md
+            git commit -m "chore(release): prepare ${{ steps.version.outputs.tag }} [skip release]"
+          fi
+
+      - name: Build cached PlatformIO image
+        if: steps.version.outputs.skip != 'true'
+        run: docker build -t pix-builder .
+
+      - name: Build firmware
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${PWD}/pix_esp8266:/workspace" \
+            -e WIFI_SSID \
+            -e WIFI_PASS \
+            -e OWM_KEY \
+            -e LASTFM_USER \
+            -e LASTFM_KEY \
+            pix-builder platformio run -e tft
+
+      - name: Upload firmware artifact
+        if: steps.version.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.version.outputs.tag }}
+          path: pix_esp8266/.pio/build/tft/firmware.bin
+          if-no-files-found: error
+
+      - name: Login to GitHub Container Registry
+        if: steps.version.outputs.skip != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build firmware-only container image
+        if: steps.version.outputs.skip != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}"
+          created="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          revision="$(git rev-parse HEAD)"
+
+          docker build \
+            -f Dockerfile.firmware \
+            --build-arg VERSION="${RELEASE_VERSION}" \
+            --build-arg REVISION="${revision}" \
+            --build-arg CREATED="${created}" \
+            -t "${image}:${RELEASE_TAG}" \
+            -t "${image}:latest" \
+            .
+
+      - name: Push firmware-only container image
+        if: steps.version.outputs.skip != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}"
+          docker push "${image}:${RELEASE_TAG}"
+          docker push "${image}:latest"
+
+      - name: Create and push tag
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "${RELEASE_TAG}" \
+            --title "PIX ${RELEASE_TAG}" \
+            --notes-file RELEASE_NOTES.md \
+            pix_esp8266/.pio/build/tft/firmware.bin
